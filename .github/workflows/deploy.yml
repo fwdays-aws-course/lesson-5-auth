@@ -1,0 +1,104 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: auth-backend
+  CDK_STACK_NAME: InfrastructureStack
+
+
+jobs:
+  deploy:
+    name: Deploy Application
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Deploy Infrastructure (if changed)
+      - name: Setup Node.js for Infrastructure
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: infrastructure/package-lock.json
+
+      - name: Install infrastructure dependencies
+        run: |
+          cd infrastructure
+          npm ci
+
+      - name: Build infrastructure
+        run: |
+          cd infrastructure
+          npx cdk synth
+
+      - name: Deploy CDK Infrastructure
+        run: |
+          cd infrastructure
+          npx cdk deploy ${{ env.CDK_STACK_NAME }} --require-approval never
+
+      # Get stack outputs
+      - name: Get Stack Outputs
+        id: stack-outputs
+        run: |
+          ECR_URI=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.CDK_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='BackendEcrRepositoryUri'].OutputValue" \
+            --output text)
+          S3_BUCKET=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.CDK_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" \
+            --output text)
+          CLOUDFRONT_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.CDK_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue" \
+            --output text)
+          BACKEND_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.CDK_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='BackendApiUrl'].OutputValue" \
+            --output text)
+          USER_POOL_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.CDK_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" \
+            --output text)
+          USER_POOL_CLIENT_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.CDK_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" \
+            --output text)
+          IDENTITY_POOL_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.CDK_STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='IdentityPoolId'].OutputValue" \
+            --output text)
+
+      # Deploy Backend
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend Docker image
+        id: build-backend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd back-end
+          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
+          echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
