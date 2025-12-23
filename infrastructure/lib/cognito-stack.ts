@@ -6,7 +6,6 @@ import { Construct } from "constructs";
 export class CognitoStack extends cdk.Stack {
   public readonly userPool: cognito.UserPool;
   public readonly userPoolClient: cognito.UserPoolClient;
-  public readonly userPoolDomain: cognito.UserPoolDomain;
   public readonly cognitoDomainName: string;
   public readonly identityPool: cognito.CfnIdentityPool;
   public readonly authenticatedRole: iam.Role;
@@ -59,20 +58,20 @@ export class CognitoStack extends cdk.Stack {
       generateSecret: false,
     });
 
-    // /**
-    //  * Cognito Hosted UI domain.
-    //  *
-    //  * NOTE:
-    //  * - This will create: https://auth-app-fwdays.auth.<region>.amazoncognito.com
-    //  * - The prefix must be globally unique per region.
-    //  * - We only define it once in this stack (so we won't create duplicates within CDK).
-    //  */
-    // this.userPoolDomain = this.userPool.addDomain("AuthUserPoolDomain", {
-    //   cognitoDomain: {
-    //     domainPrefix: "auth-app-fwdays",
-    //   },
-    // });
-    // this.cognitoDomainName = `auth-app-fwdays.auth.${cdk.Stack.of(this).region}.amazoncognito.com`;
+    /**
+     * Cognito Hosted UI domain.
+     *
+     * Using existing hardcoded domain that already exists in Cognito.
+     * We don't create the domain resource in CloudFormation since it already exists.
+     * Full domain: https://auth-app-fwdays.auth.eu-west-2.amazoncognito.com
+     */
+    const domainPrefix = "auth-app-fwdays";
+    const stack = cdk.Stack.of(this);
+    const region = stack.region || "eu-west-2";
+
+    // Domain already exists in Cognito, so we just reference it by name
+    // Don't create the domain resource in CloudFormation
+    this.cognitoDomainName = `${domainPrefix}.auth.${region}.amazoncognito.com`;
 
     this.identityPool = new cognito.CfnIdentityPool(this, "AuthIdentityPool", {
       identityPoolName: "auth-identity-pool",
@@ -135,14 +134,19 @@ export class CognitoStack extends cdk.Stack {
       description: "Cognito User Pool Client ID",
     });
 
-    new cdk.CfnOutput(this, "UserPoolDomainUrl", {
-      value: this.userPoolDomain.baseUrl(),
-      description: "Cognito Hosted UI domain base URL",
-    });
+    // new cdk.CfnOutput(this, "UserPoolDomainUrl", {
+    //   value: this.userPoolDomain.baseUrl(),
+    //   description: "Cognito Hosted UI domain base URL",
+    // });
 
     new cdk.CfnOutput(this, "CognitoDomainName", {
       value: this.cognitoDomainName,
       description: "Cognito Hosted UI domain hostname (no protocol)",
+    });
+
+    new cdk.CfnOutput(this, "CognitoDomainPrefix", {
+      value: domainPrefix,
+      description: "Cognito domain prefix used (for debugging)",
     });
 
     new cdk.CfnOutput(this, "IdentityPoolId", {
