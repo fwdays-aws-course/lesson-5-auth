@@ -59,20 +59,20 @@ export class CognitoStack extends cdk.Stack {
       generateSecret: false,
     });
 
-    /**
-     * Cognito Hosted UI domain.
-     *
-     * NOTE:
-     * - This will create: https://auth-app-fwdays.auth.<region>.amazoncognito.com
-     * - The prefix must be globally unique per region.
-     * - We only define it once in this stack (so we won't create duplicates within CDK).
-     */
-    this.userPoolDomain = this.userPool.addDomain("AuthUserPoolDomain", {
-      cognitoDomain: {
-        domainPrefix: "auth-app-fwdays",
-      },
-    });
-    this.cognitoDomainName = `auth-app-fwdays.auth.${cdk.Stack.of(this).region}.amazoncognito.com`;
+    // /**
+    //  * Cognito Hosted UI domain.
+    //  *
+    //  * NOTE:
+    //  * - This will create: https://auth-app-fwdays.auth.<region>.amazoncognito.com
+    //  * - The prefix must be globally unique per region.
+    //  * - We only define it once in this stack (so we won't create duplicates within CDK).
+    //  */
+    // this.userPoolDomain = this.userPool.addDomain("AuthUserPoolDomain", {
+    //   cognitoDomain: {
+    //     domainPrefix: "auth-app-fwdays",
+    //   },
+    // });
+    // this.cognitoDomainName = `auth-app-fwdays.auth.${cdk.Stack.of(this).region}.amazoncognito.com`;
 
     this.identityPool = new cognito.CfnIdentityPool(this, "AuthIdentityPool", {
       identityPoolName: "auth-identity-pool",
