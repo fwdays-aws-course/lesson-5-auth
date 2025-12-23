@@ -14,7 +14,9 @@
     "isbot": "^5.1.31",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
-    "react-router": "7.10.1"
+    "react-router": "7.10.1",
+    "aws-amplify": "^6.0.0",
+    "@aws-amplify/auth": "^6.0.0"
   },
   "devDependencies": {
     "@react-router/dev": "7.10.1",

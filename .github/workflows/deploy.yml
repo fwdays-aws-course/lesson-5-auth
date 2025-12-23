@@ -2,103 +2,113 @@ name: Deploy to AWS
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
 
 env:
-  AWS_REGION: eu-west-1
-  ECR_REPOSITORY: auth-backend
-  CDK_STACK_NAME: InfrastructureStack
-
+  AWS_REGION: eu-west-2
+  STACK_NAME: InfrastructureStack
 
 jobs:
   deploy:
-    name: Deploy Application
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # Deploy Infrastructure (if changed)
-      - name: Setup Node.js for Infrastructure
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: infrastructure/package-lock.json
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            front-end/package-lock.json
+            back-end/package-lock.json
+            infrastructure/package-lock.json
+
+      - name: Build frontend (SPA assets)
+        working-directory: front-end
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
 
       - name: Install infrastructure dependencies
+        working-directory: infrastructure
         run: |
-          cd infrastructure
+          set -euo pipefail
           npm ci
 
-      - name: Build infrastructure
+      - name: Deploy infrastructure (CDK)
+        working-directory: infrastructure
         run: |
-          cd infrastructure
-          npx cdk synth
+          set -euo pipefail
+          # Cognito domain + Google IdP are configured manually (see SETUP.md).
+          npx cdk deploy "${STACK_NAME}" --require-approval never
 
-      - name: Deploy CDK Infrastructure
+      - name: Configure runtime config + Cognito OAuth URLs
         run: |
-          cd infrastructure
-          npx cdk deploy ${{ env.CDK_STACK_NAME }} --require-approval never
+          set -euo pipefail
+          REGION="${AWS_REGION}"
 
-      # Get stack outputs
-      - name: Get Stack Outputs
-        id: stack-outputs
+          get_output() {
+            local key="$1"
+            aws cloudformation describe-stacks \
+              --stack-name "${STACK_NAME}" \
+              --query "Stacks[0].Outputs[?OutputKey=='${key}'].OutputValue | [0]" \
+              --output text
+          }
+
+          S3_BUCKET=$(get_output FrontendBucketName)
+          CLOUDFRONT_ID=$(get_output DistributionId)
+          CLOUDFRONT_DOMAIN=$(get_output DistributionDomainName)
+          BACKEND_URL=$(get_output BackendApiUrl)
+          USER_POOL_ID=$(get_output UserPoolId)
+          CLIENT_ID=$(get_output UserPoolClientId)
+          IDENTITY_POOL_ID=$(get_output IdentityPoolId)
+
+          COGNITO_DOMAIN=$(get_output CognitoDomainName)
+          if [ -z "$COGNITO_DOMAIN" ] || [ "$COGNITO_DOMAIN" = "None" ]; then
+            PREFIX=$(aws cognito-idp describe-user-pool --user-pool-id "$USER_POOL_ID" --query "UserPool.Domain" --output text 2>/dev/null || true)
+            [ -n "$PREFIX" ] && [ "$PREFIX" != "None" ] && COGNITO_DOMAIN="${PREFIX}.auth.${REGION}.amazoncognito.com"
+          fi
+
+          echo "window.APP_CONFIG={VITE_API_URL:\"${BACKEND_URL}\",VITE_USER_POOL_ID:\"${USER_POOL_ID}\",VITE_USER_POOL_CLIENT_ID:\"${CLIENT_ID}\",VITE_IDENTITY_POOL_ID:\"${IDENTITY_POOL_ID}\",VITE_AWS_REGION:\"${REGION}\",VITE_COGNITO_DOMAIN:\"${COGNITO_DOMAIN}\",VITE_REDIRECT_SIGN_IN:\"https://${CLOUDFRONT_DOMAIN}/callback\",VITE_REDIRECT_SIGN_OUT:\"https://${CLOUDFRONT_DOMAIN}\"};" > config.js
+
+          aws s3 cp config.js "s3://${S3_BUCKET}/config.js" --content-type "application/javascript" --cache-control "no-cache"
+
+          GOOGLE_EXISTS=$(aws cognito-idp list-identity-providers --user-pool-id "$USER_POOL_ID" --query "Providers[?ProviderName=='Google'].ProviderName" --output text 2>/dev/null || true)
+          [ "$GOOGLE_EXISTS" = "Google" ] && PROVIDERS="COGNITO Google" || PROVIDERS="COGNITO"
+
+          aws cognito-idp update-user-pool-client \
+            --user-pool-id "$USER_POOL_ID" \
+            --client-id "$CLIENT_ID" \
+            --supported-identity-providers $PROVIDERS \
+            --callback-urls "http://localhost:5173/callback" "https://${CLOUDFRONT_DOMAIN}/callback" \
+            --logout-urls "http://localhost:5173" "https://${CLOUDFRONT_DOMAIN}" \
+            --allowed-o-auth-flows code implicit \
+            --allowed-o-auth-scopes email openid profile \
+            --allowed-o-auth-flows-user-pool-client \
+            --explicit-auth-flows ALLOW_USER_PASSWORD_AUTH ALLOW_USER_SRP_AUTH ALLOW_REFRESH_TOKEN_AUTH
+
+          aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_ID" --paths "/*"
+          echo "Done: $COGNITO_DOMAIN"
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Build & push backend image (App Runner auto-deploys on :latest)
         run: |
-          ECR_URI=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.CDK_STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='BackendEcrRepositoryUri'].OutputValue" \
-            --output text)
-          S3_BUCKET=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.CDK_STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" \
-            --output text)
-          CLOUDFRONT_ID=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.CDK_STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue" \
-            --output text)
-          BACKEND_URL=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.CDK_STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='BackendApiUrl'].OutputValue" \
-            --output text)
-          USER_POOL_ID=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.CDK_STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" \
-            --output text)
-          USER_POOL_CLIENT_ID=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.CDK_STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue" \
-            --output text)
-          IDENTITY_POOL_ID=$(aws cloudformation describe-stacks \
-            --stack-name ${{ env.CDK_STACK_NAME }} \
-            --query "Stacks[0].Outputs[?OutputKey=='IdentityPoolId'].OutputValue" \
-            --output text)
-
-      # Deploy Backend
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push backend Docker image
-        id: build-backend
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
+          set -euo pipefail
           cd back-end
-          docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
-          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
-          docker tag $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
-          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest
-          echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          IMAGE="${{ steps.ecr.outputs.registry }}/auth-backend:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          docker tag "$IMAGE" "${{ steps.ecr.outputs.registry }}/auth-backend:latest"
+          docker push "${{ steps.ecr.outputs.registry }}/auth-backend:latest"

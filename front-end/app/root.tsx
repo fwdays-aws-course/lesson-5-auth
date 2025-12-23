@@ -6,9 +6,23 @@ import {
   Scripts,
   ScrollRestoration,
 } from "react-router";
+import { configureAuth } from "./lib/auth";
 
 import type { Route } from "./+types/root";
 import "./app.css";
+
+// Configure Amplify Auth as early as possible on the client.
+// For OAuth redirect flows, Amplify must be configured BEFORE we try to read session/tokens.
+declare global {
+  interface Window {
+    __AMPLIFY_AUTH_CONFIGURED__?: boolean;
+  }
+}
+
+if (typeof window !== "undefined" && !window.__AMPLIFY_AUTH_CONFIGURED__) {
+  configureAuth();
+  window.__AMPLIFY_AUTH_CONFIGURED__ = true;
+}
 
 export const links: Route.LinksFunction = () => [
   { rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -31,6 +45,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <Meta />
         <Links />
+        {/* Load runtime configuration before app scripts */}
+        <script src="/config.js" />
       </head>
       <body>
         {children}

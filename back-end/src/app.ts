@@ -6,6 +6,7 @@ import authPlugin from './plugins/auth'
 import publicRoutes from './routes/public'
 import protectedRoutes from './routes/protected'
 import authRoutes from './routes/auth'
+import rootRoutes from './routes/root'
 
 export interface AppOptions extends FastifyServerOptions, Partial<AutoloadPluginOptions> {
   // Опції для Cognito аутентифікації
@@ -24,11 +25,39 @@ const app: FastifyPluginAsync<AppOptions> = async (
   fastify,
   opts
 ): Promise<void> => {
-  // Реєструємо CORS для дозволу запитів з фронтенду
-  // У продакшені краще вказати конкретні домени
+  /**
+   * CORS
+   *
+   * Why this exists:
+   * - The frontend calls the backend cross-origin (CloudFront -> App Runner)
+   * - Requests with `Authorization` trigger an OPTIONS preflight
+   * - Without proper CORS headers on preflight, the browser blocks the request
+   *
+   * App Runner "easy fix":
+   * - Set `CORS_ORIGIN` to the CloudFront URL (comma-separated list supported)
+   *   e.g. `https://d21qxpkeqvjscm.cloudfront.net`
+   */
+  const corsOriginEnv = (process.env.CORS_ORIGIN || '').trim()
+  const allowedOrigins = corsOriginEnv
+    ? corsOriginEnv.split(',').map((s) => s.trim()).filter(Boolean)
+    : []
+  const allowAllOrigins = allowedOrigins.length === 0 || allowedOrigins.includes('*')
+  const allowCredentials = (process.env.CORS_CREDENTIALS || '').toLowerCase() === 'true'
+
   await fastify.register(cors, {
-    origin: true, // Дозволяємо всі джерела (для навчальних цілей)
-    credentials: true, // Дозволяємо передачу cookies та credentials
+    origin: (origin, cb) => {
+      // Non-browser clients (curl, health checks) often don't send Origin
+      if (!origin) return cb(null, true)
+      if (allowAllOrigins) return cb(null, true)
+      return cb(null, allowedOrigins.includes(origin))
+    },
+    // Keep this off by default; turn on only if you truly rely on cookies.
+    // (Authorization-header auth does NOT need credentials.)
+    credentials: allowCredentials && !allowAllOrigins,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type'],
+    optionsSuccessStatus: 204,
+    maxAge: 60 * 60 * 24, // 24h
   })
 
   // Отримуємо конфігурацію з опцій або змінних оточення
@@ -62,13 +91,8 @@ const app: FastifyPluginAsync<AppOptions> = async (
   await fastify.register(protectedRoutes, { prefix: '/protected' })
   await fastify.register(authRoutes, { prefix: '/auth' })
 
-  // Load other routes (like root.ts, example/) via AutoLoad
-  // eslint-disable-next-line no-void
-  void fastify.register(AutoLoad, {
-    dir: join(__dirname, 'routes'),
-    options: opts,
-    ignorePattern: /^(public|protected|auth)\.(ts|js)$/
-  })
+  // Root routes (/, /health)
+  await fastify.register(rootRoutes)
 }
 
 export default app

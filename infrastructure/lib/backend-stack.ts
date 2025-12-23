@@ -2,12 +2,16 @@ import * as cdk from "aws-cdk-lib";
 import * as apprunner from "aws-cdk-lib/aws-apprunner";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
-import * as logs from "aws-cdk-lib/aws-logs";
 import { Construct } from "constructs";
 
 export interface BackendStackProps extends cdk.StackProps {
   userPoolId: string;
   region: string;
+  /**
+   * Allowed CORS origins for the API (comma-separated supported).
+   * Example: https://d21qxpkeqvjscm.cloudfront.net
+   */
+  corsOrigin?: string;
 }
 
 export class BackendStack extends cdk.Stack {
@@ -30,50 +34,80 @@ export class BackendStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    // Create IAM role for App Runner service
     const appRunnerTasksRole = new iam.Role(this, "AppRunnerTasksRole", {
       assumedBy: new iam.ServicePrincipal("tasks.apprunner.amazonaws.com"),
-      description: "Role for App Runner service to access AWS resources",
     });
 
     const appRunnerBuildRole = new iam.Role(this, "AppRunnerBuildRole", {
       assumedBy: new iam.ServicePrincipal("build.apprunner.amazonaws.com"),
-      description: "Role for App Runner to pull images from ECR",
     });
 
-    const logGroup = new logs.LogGroup(this, 'AppRunnerLogGroup', {
-        logGroupName: '/aws/apprunner/auth-backend',
-        retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
-      });
-  
+    this.ecrRepository.grantPull(appRunnerBuildRole);
 
-    this.ecrRepository.grantPull(appRunnerTasksRole);
-
-    const observabilityConfig = this.createObservabilityConfig(logGroup);
-  }
-
-  /**
-   * Creates an observability configuration for App Runner
-   * This enables CloudWatch logging and tracing
-   */
-  private createObservabilityConfig(logGroup: logs.LogGroup): apprunner.CfnObservabilityConfiguration {
-    const observabilityConfig = new apprunner.CfnObservabilityConfiguration(
-      this,
-      'AppRunnerObservabilityConfig',
-      {
-        observabilityConfigurationName: `auth-backend-observability`,
-        traceConfiguration: {
-          vendor: 'AWSXRAY',
+    const serviceConfig = new apprunner.CfnService(this, 'AppRunnerService', {
+        serviceName: 'auth-backend',
+        sourceConfiguration: {
+          imageRepository: {
+            imageIdentifier: `${this.ecrRepository.repositoryUri}:latest`,
+            imageRepositoryType: 'ECR',
+            imageConfiguration: {
+              port: '3000',
+              runtimeEnvironmentVariables: [
+                {
+                  name: 'USER_POOL_ID',
+                  value: props.userPoolId,
+                },
+                {
+                  name: 'AWS_REGION',
+                  value: props.region,
+                },
+                ...(props.corsOrigin
+                  ? [
+                      {
+                        name: 'CORS_ORIGIN',
+                        value: props.corsOrigin,
+                      },
+                    ]
+                  : []),
+                {
+                  name: 'NODE_ENV',
+                  value: 'production',
+                },
+              ],
+              startCommand: 'npx fastify start -l info -a 0.0.0.0 dist/app.js',
+            },
+          },
+          autoDeploymentsEnabled: true,
+          authenticationConfiguration: {
+            accessRoleArn: appRunnerBuildRole.roleArn,
+          },
         },
-      }
-    );
+        instanceConfiguration: { instanceRoleArn: appRunnerTasksRole.roleArn },
+        healthCheckConfiguration: {
+          protocol: 'HTTP',
+          path: '/health',
+        },
+      });
 
-    // Grant App Runner permission to write to CloudWatch Logs
-    logGroup.grantWrite(
-      new iam.ServicePrincipal('apprunner.amazonaws.com')
-    );
+    this.service = serviceConfig;
+    this.backendUrl = `https://${serviceConfig.attrServiceUrl}`;
 
-    return observabilityConfig;
+    // Outputs (for reference in nested stack)
+    // Keep this output for backward compatibility: older parent stacks may still
+    // import this export, and CloudFormation will fail updates if we remove it.
+    new cdk.CfnOutput(this, 'AppRunnerServiceArn', {
+      value: serviceConfig.attrServiceArn,
+      description: 'App Runner Service ARN',
+    });
+
+    new cdk.CfnOutput(this, 'BackendEcrRepositoryUri', {
+      value: this.ecrRepository.repositoryUri,
+      description: 'ECR Repository URI for Backend',
+    });
+
+    new cdk.CfnOutput(this, 'BackendApiUrl', {
+      value: this.backendUrl,
+      description: 'Backend API URL',
+    });
   }
 }
